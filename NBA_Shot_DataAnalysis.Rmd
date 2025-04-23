@@ -1,0 +1,417 @@
+---
+title: "Predicting NBA Shot Success"
+author: "Rylen Grundy"
+date: "2025-02-12"
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load Packages
+
+```{r}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(xgboost)
+library(keras)
+library(recipes)
+library(data.table)
+```
+
+# Load and Create Data Set
+
+## Loading all the datasets of shot data from years 2004-2024
+
+```{r}
+NBA_2004_Shots = read.csv('C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData/NBA_2004_Shots.csv')
+NBA_2005_Shots = read.csv('C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData/NBA_2005_Shots.csv')
+NBA_2006_Shots = read.csv('C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData/NBA_2006_Shots.csv')
+NBA_2007_Shots = read.csv('C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData/NBA_2007_Shots.csv')
+NBA_2008_Shots = read.csv('C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData/NBA_2008_Shots.csv')
+NBA_2009_Shots = read.csv('C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData/NBA_2009_Shots.csv')
+NBA_2010_Shots = read.csv('C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData/NBA_2010_Shots.csv')
+NBA_2011_Shots = read.csv('C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData/NBA_2011_Shots.csv')
+NBA_2012_Shots = read.csv('C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData/NBA_2012_Shots.csv')
+NBA_2013_Shots = read.csv('C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData/NBA_2013_Shots.csv')
+NBA_2014_Shots = read.csv('C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData/NBA_2014_Shots.csv')
+NBA_2015_Shots = read.csv('C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData/NBA_2015_Shots.csv')
+NBA_2016_Shots = read.csv('C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData/NBA_2016_Shots.csv')
+NBA_2017_Shots = read.csv('C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData/NBA_2017_Shots.csv')
+NBA_2018_Shots = read.csv('C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData/NBA_2018_Shots.csv')
+NBA_2019_Shots = read.csv('C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData/NBA_2019_Shots.csv')
+NBA_2020_Shots = read.csv('C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData/NBA_2020_Shots.csv')
+NBA_2021_Shots = read.csv('C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData/NBA_2021_Shots.csv')
+NBA_2022_Shots = read.csv('C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData/NBA_2022_Shots.csv')
+NBA_2023_Shots = read.csv('C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData/NBA_2023_Shots.csv')
+NBA_2024_Shots = read.csv('C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData/NBA_2024_Shots.csv')
+```
+
+## Combine all of the years into one dataset.
+
+```{r}
+shots = list.files(path = "C:/Users/rgrun/Spring 2025/Senior Thesis/ShotData", pattern = "*.csv", full.names = TRUE) %>%
+  lapply(read.csv)%>%
+  bind_rows()
+shots = as.data.frame(shots)
+```
+
+# Inspect and clean data
+
+## Inspect Variable Types
+
+```{r}
+glimpse(shots)
+```
+
+## Check for missing values
+
+```{r}
+colSums(is.na(shots))
+```
+
+Position Group and Position have 7930 missing values. Because this is such a small fraction of the total data, I think it's best if these observations are deleted that way we can still attempt to use Position as a predictor.
+
+```{r}
+shots = shots %>%
+  filter(!is.na(POSITION))
+```
+
+Check again to see if any variables have missing values
+
+```{r}
+colSums(is.na(shots))
+```
+
+
+## Check Team Names and Team ID
+
+I know some team names and cities have change over this time period, so checking to see how the team ID's compare is necessary.
+
+```{r}
+team_id_changes <- shots %>%
+  group_by(TEAM_ID) %>%
+  summarize(unique_names = paste(unique(TEAM_NAME), collapse = ", "),
+            name_count = n_distinct(TEAM_NAME)) %>%
+  filter(name_count > 1) # Only keep team_ids with multiple names
+
+print(team_id_changes)
+```
+
+As the results show, some teams have gone through name and city changes but they remain with the same team ID. For this reason I will be using team ID as the unique identifier for teams when comparing shots across time periods.
+
+## Change all values of LA Clippers in the team_name variable to Los Angeles Clippers for continuity
+
+```{r}
+shots = shots %>%
+  mutate(TEAM_NAME = case_when(
+    TEAM_NAME == "LA Clippers" ~ "Los Angeles Clippers",
+    TRUE ~ TEAM_NAME
+  ))
+```
+
+## Rename Columns for Clarity
+
+```{r}
+shots = dplyr::rename(shots,  SHOT_DISTANCE_FT = SHOT_DISTANCE)
+```
+
+
+## Remove redundant columns
+
+```{r}
+shots = shots %>% select(-POSITION, -EVENT_TYPE, -ZONE_ABB)
+```
+
+
+# Conduct Exploratory Data Analysis (EDA)
+
+## Visualizing Shot Success Rate
+
+Calculate overall shot success rate
+
+```{r}
+# Calculate overall shot success rate
+shot_success = shots %>%
+  group_by(SHOT_MADE) %>%
+  summarise(count = n())
+
+# Bar plot of shot success
+ggplot(shot_success, aes(x = as.factor(SHOT_MADE), y = count, fill = as.factor(SHOT_MADE))) +
+  geom_bar(stat = "identity") +
+  labs(title = "Count of Shots Success", x = "Shot Made", y = "Count") +
+  scale_fill_manual(values = c("red", "green"), labels = c("Missed", "Made")) +
+  theme_minimal()
+```
+
+Shot Success by Shot Type (2pt vs 3pt)
+
+```{r}
+ggplot(shots, aes(x = SHOT_TYPE, fill = as.factor(SHOT_MADE))) +
+  geom_bar(position = "fill") +
+  labs(title = "Shot Success Rate by Shot Type", x = "Shot Type", y = "Proportion") +
+  scale_fill_manual(values = c("red", "green"), labels = c("Missed", "Made")) +
+  theme_minimal()
+
+```
+
+Shot Success by Distance
+
+```{r}
+# Shot Success by distance
+ggplot(shots, aes(x = SHOT_DISTANCE_FT, fill = SHOT_MADE)) +
+  geom_histogram(binwidth = 2, position = "dodge") +
+  labs(title = "Shot Success by Distance", x = "Shot Distance (ft)", y = "Count") +
+  scale_fill_manual(values = c("red", "green"))
+```
+
+# Identifying Key Patterns
+
+Shot Success by Game Time (Quarter and Time Left)
+
+```{r}
+ggplot(shots, aes(x = QUARTER, fill = as.factor(SHOT_MADE))) +
+  geom_bar(position = "fill") +
+  labs(title = "Shot Success Rate by Quarter", x = "Quarter", y = "Proportion") +
+  scale_fill_manual(values = c("red", "green"), labels = c("Missed", "Made")) +
+  theme_minimal()
+
+```
+
+```{r}
+ggplot(shots, aes(x = ((MINS_LEFT * 60) + SECS_LEFT)/60, fill = as.factor(SHOT_MADE))) +
+  geom_histogram(binwidth = 1, position = "identity", alpha = 0.7) +
+  labs(title = "Shot Success Rate by Time Left in Quarter", x = "Minutes Left", y = "Count") +
+  scale_fill_manual(values = c("red", "green"), labels = c("Missed", "Made")) +
+  theme_minimal()
+
+```
+
+
+# Preliminary Feature Importance
+
+## Convert Categorical Variables to Factors
+
+```{r}
+shots = shots %>%
+  mutate(across(where(is.character), as.factor))
+```
+
+## Convert Team_ID to Factor
+
+```{r}
+shots$TEAM_ID = as.factor(shots$TEAM_ID)
+```
+
+### Inspect Variables again
+
+```{r}
+glimpse(shots)
+```
+
+
+# Engineer Features
+
+## Engineer a Home vs. Away Indicator
+
+```{r}
+# Check to see all the team names and abbreviations
+sort(unique(shots$HOME_TEAM))
+sort(unique(shots$TEAM_NAME))
+```
+
+```{r}
+# Map all team names to their respective abbreviation
+team_mapping = data.frame(
+  team_name = c("Atlanta Hawks", "Boston Celtics", "Brooklyn Nets", "Charlotte Bobcats", "Charlotte Hornets", "Chicago Bulls", "Cleveland Cavaliers", "Dallas Mavericks", "Denver Nuggets", "Detroit Pistons", "Golden State Warriors", "Houston Rockets", "Indiana Pacers", "Los Angeles Clippers", "Los Angeles Lakers", "Memphis Grizzlies", "Miami Heat", "Milwaukee Bucks", "Minnesota Timberwolves", "New Jersey Nets", "New Orleans Hornets", "New Orleans Pelicans", "New Orleans/Oklahoma City Hornets", "New York Knicks", "Oklahoma City Thunder", "Orlando Magic", "Philadelphia 76ers", "Phoenix Suns", "Portland Trail Blazers", "Sacramento Kings", "San Antonio Spurs", "Seattle SuperSonics", "Toronto Raptors", "Utah Jazz", "Washington Wizards"),
+  team_abbreviation = c("ATL", "BOS", "BKN", "CHA", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW", "HOU", "IND", "LAC", "LAL", "MEM", "MIA", "MIL", "MIN", "NJN", "NOH", "NOP", "NOK", "NYK", "OKC", "ORL", "PHI", "PHX", "POR", "SAC", "SAS", "SEA", "TOR", "UTA", "WAS")
+)
+
+# Join the mapping to shots based on the full team name
+shots = shots %>%
+  left_join(team_mapping, by = c("TEAM_NAME" = "team_name"))
+
+# Create the 'is_home' feature based on home team abbreviation
+shots = shots %>%
+  mutate(Is_Home = ifelse(team_abbreviation == HOME_TEAM, 1, 0))
+```
+## Engineer Feature for Time Elapsed
+
+This variable will help provide a better understanding how much time in the game has elapsed when the shot was taken
+
+```{r}
+# Calculate the total amount of seconds that have elapsed at the time of the shot
+
+shots$Game_Sec_Elapsed <- ifelse(
+  shots$QUARTER <= 4,
+  ((shots$QUARTER - 1) * 12 * 60) + (12 * 60 - (shots$MINS_LEFT * 60 + shots$SECS_LEFT)),
+  (4 * 12 * 60) + ((shots$QUARTER - 5) * 5 * 60) + (5 * 60 - (shots$MINS_LEFT * 60 + shots$SECS_LEFT))
+)
+```
+
+## Engineer Shot_Made to also have a numeric representation
+
+```{r}
+shots$SHOT_MADE_Numeric <- as.numeric(shots$SHOT_MADE)
+```
+
+
+## Investigate how variables are related
+
+### Look at Numeric Variables
+
+```{r}
+library(purrr)
+
+data <- shots
+target_var <- "SHOT_MADE_Numeric"
+
+# Ensure the target variable is numeric
+data[[target_var]] <- as.numeric(data[[target_var]])
+
+# Get all numeric predictor variables (excluding target variable)
+predictor_vars <- names(data) %>% 
+  setdiff(target_var) %>% 
+  keep(~ is.numeric(data[[.x]]))  # Keep only numeric predictors
+
+# Run cor.test() for each predictor
+cor_results <- predictor_vars %>%
+  map_df(~ {
+    # Ensure both the predictor and target are numeric
+    predictor <- as.numeric(data[[.x]])
+    target <- as.numeric(data[[target_var]])
+    
+    # Perform the correlation test
+    test <- cor.test(predictor, target, use = "complete.obs")
+    
+    # Return results in a tibble
+    tibble(Variable = .x, Correlation = test$estimate, P_value = test$p.value)
+  })
+
+# Print results
+print(cor_results)
+```
+
+Most variables have a weak correlation with whether a shot is made or not, but the p-values are extremely small which indicate statistical significance. SHOT_DISTANCE and LOC_Y stand out as they have slightly stronger correlations than other variables, meaning their relationship with the target variable is more meaningful.
+
+### Look at Categorical Variables
+
+```{r}
+target_var2 = "SHOT_MADE"
+categorical_vars = names(shots)[sapply(shots, is.factor)]
+
+categorical_vars = setdiff(categorical_vars, target_var2)
+
+chi_results = categorical_vars %>%
+  map_df(~ {
+    test = chisq.test(table(shots[[.x]], shots[[target_var2]]))
+    tibble(Variable = .x, Chi_Square = test$statistic, P_Value = test$p.value)
+  })
+
+print(chi_results)
+```
+
+All of the variables have small p-values which means they are all significantly associated with shot success. Action_type, shot_type, basic_zone and zone_name have the strongest relationships, which suggest that where and how a player shoots significantly affects success. Player_name and Position_group also have a strong relationship which makes sense as different players have different shooting abilities and tendencies. Variables such as team_name, season_2, home_team and away_team have weaker relationships with the target variables.
+
+# Select Relevant Variables for Model
+
+```{r}
+df = shots %>% select(SEASON_2, TEAM_ID, PLAYER_NAME, POSITION_GROUP, ACTION_TYPE, BASIC_ZONE, SHOT_DISTANCE_FT, Is_Home, Game_Sec_Elapsed, SHOT_MADE_Numeric)
+```
+
+## Data Preprocessing
+
+```{r}
+# Name the data for ease of use
+data = df
+
+# Define target variable
+target_var = "SHOT_MADE_Numeric"
+
+# One-hot encode POSITION_GROUP and BASIC_ZONE
+recipe_prep <- recipe(SHOT_MADE_Numeric ~ ., data = data) %>%
+  step_dummy(all_of(c("POSITION_GROUP", "BASIC_ZONE")), one_hot = TRUE) %>%
+  prep(training = data)
+
+data <- bake(recipe_prep, new_data = data)
+
+# K-fold target encoding function
+kfold_target_encode <- function(data, cat_vars, target_var, k = 5) {
+  set.seed(123)
+  folds <- createFolds(data[[target_var]], k = k, list = TRUE)
+  
+  for (var in cat_vars) {
+    encoded_vals <- numeric(nrow(data))
+    
+    for (i in seq_along(folds)) {
+      train_idx <- unlist(folds[-i])
+      valid_idx <- folds[[i]]
+      
+      means <- data[train_idx, ] %>%
+        group_by(across(all_of(var))) %>%
+        summarise(mean_target = mean(.data[[target_var]], na.rm = TRUE), .groups = "drop")
+      
+      encoded_vals[valid_idx] <- data[valid_idx, ] %>% 
+        left_join(means, by = var) %>% 
+        pull(mean_target)
+    }
+    
+    data[[var]] <- ifelse(is.na(encoded_vals), mean(data[[target_var]], na.rm = TRUE), encoded_vals)
+  }
+  return(data)
+}
+
+# Apply K-fold target encoding
+categorical_vars <- c("SEASON_2", "TEAM_ID", "PLAYER_NAME", "ACTION_TYPE")
+data <- kfold_target_encode(data, categorical_vars, target_var)
+```
+
+
+# Split Data into Training and Testing Sets
+
+```{r}
+set.seed(123)
+trainIndex <- createDataPartition(data$SHOT_MADE_Numeric, p = 0.8, list = FALSE)
+train_data <- data[trainIndex, ]
+test_data <- data[-trainIndex, ]
+```
+
+## Logisitc Regression Model
+
+```{r}
+logistic_model <- glm(SHOT_MADE_Numeric ~ ., data = train_data, family = binomial)
+logistic_preds <- predict(logistic_model, newdata = test_data, type = "response")
+logistic_preds_class <- ifelse(logistic_preds > 0.5, 1, 0)
+confusionMatrix(as.factor(logistic_preds_class), as.factor(test_data$SHOT_MADE_Numeric))
+```
+
+```{r}
+summary(logistic_model)
+exp(coef(logistic_model))
+```
+
+
+## Gradient Boosting Model
+```{r}
+xgb_train <- xgb.DMatrix(data = as.matrix(train_data %>% select(-SHOT_MADE_Numeric)), label = train_data$SHOT_MADE_Numeric)
+xgb_test <- xgb.DMatrix(data = as.matrix(test_data %>% select(-SHOT_MADE_Numeric)), label = test_data$SHOT_MADE_Numeric)
+
+xgb_model <- xgboost(data = xgb_train, max_depth = 6, eta = 0.1, nrounds = 100, objective = "binary:logistic")
+xgb_preds <- predict(xgb_model, xgb_test)
+xgb_preds_class <- ifelse(xgb_preds > 0.5, 1, 0)
+confusionMatrix(as.factor(xgb_preds_class), as.factor(test_data$SHOT_MADE_Numeric))
+```
+
+```{r}
+importance = xgb.importance(model = xgb_model)
+xgb.plot.importance(importance, top_n = 10)
+```
+
+
